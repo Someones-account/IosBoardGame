@@ -1,17 +1,3 @@
-//
-//  MatchHistoryScreen.swift
-//  TableTop Hub
-//
-//  Match History screen (screen 3) + RootView that switches between tabs.
-//  Depends on MatchLoggerScreen.swift (models, Theme, AppTabBar, shared repository).
-//  If your environment only supports ONE file, paste this file's contents below
-//  the contents of MatchLoggerScreen.swift and delete the duplicate `import SwiftUI`.
-//
-//  ASSUMPTIONS (search for "ASSUMPTION"):
-//  - "Me" (needed for the Won / Lost filter) is the first player in the library.
-//  - Edit, opening a match (screen 4), Home, Rulebooks and Dice are MOCKED.
-//  - Matches live in the shared in-memory repository, seeded with sample data.
-//
 
 import SwiftUI
 import Combine

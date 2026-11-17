@@ -14,6 +14,7 @@
 //
 
 import SwiftUI
+import Combine
 
 // MARK: - Theme
 
@@ -93,6 +94,7 @@ enum GameLibrary {
 }
 
 final class PlayerStore: ObservableObject {
+    static let shared = PlayerStore()
     @Published private(set) var players: [Player]
 
     // MOCK: seeded library of known players.
@@ -125,9 +127,18 @@ protocol MatchRepository {
 }
 
 /// MOCK persistence: keeps matches in memory only.
-final class InMemoryMatchRepository: MatchRepository {
-    private(set) var matches: [LoggedMatch] = []
-    func save(_ match: LoggedMatch) { matches.append(match) }
+final class InMemoryMatchRepository: MatchRepository, ObservableObject {
+    static let shared = InMemoryMatchRepository()
+
+    @Published private(set) var matches: [LoggedMatch] = []
+
+    func save(_ match: LoggedMatch) {
+        matches.append(match)
+    }
+
+    func delete(id: UUID) {
+        matches.removeAll { $0.id == id }
+    }
 }
 
 // MARK: - View model
@@ -201,8 +212,14 @@ final class MatchLoggerViewModel: ObservableObject {
 // MARK: - Screen
 
 struct MatchLoggerScreen: View {
+    
     @StateObject private var vm = MatchLoggerViewModel()
-    @State private var tab: AppTab = .log       // ASSUMPTION: "Log" is the active tab here
+    @Binding var tab: AppTab
+
+    init(tab: Binding<AppTab> = .constant(.log)) {
+        _tab = tab
+    }
+    
     @State private var showAddPlayer = false
     @State private var showAddGameAlert = false
     @State private var showDiceAlert = false
@@ -294,7 +311,7 @@ private struct CardCaption: View {
     }
 }
 
-private struct FieldBackground: ViewModifier {
+struct FieldBackground: ViewModifier {
     func body(content: Content) -> some View {
         content
             .padding(.horizontal, 14)
