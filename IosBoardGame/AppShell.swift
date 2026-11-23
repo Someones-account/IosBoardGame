@@ -2,25 +2,9 @@
 //  AppShell.swift
 //  TableTop Hub
 //
-//  Starting point of the app: ONE tab bar owned by RootView, an AppRouter that any
-//  screen can use to navigate, an empty Home screen, and placeholders for screens
-//  that are not built yet.
-//
-//  To launch: show RootView() in your app entry point, for example
-//
-//      @main struct TableTopHubApp: App {
-//          var body: some Scene { WindowGroup { RootView() } }
-//      }
-//
-//  or keep your existing entry point and use `typealias ContentView = RootView`.
-//
-//  ASSUMPTIONS:
-//  - All screens stay alive while you switch tabs, so a half-filled Log form is kept.
-//  - The raised dice button is a route too (AppTab.dice); its screen is a placeholder.
-//  - Home is intentionally empty for now.
-//
 
 import SwiftUI
+import Combine
 
 // MARK: - Routes
 
@@ -38,8 +22,6 @@ enum AppTab: String, CaseIterable {
     }
 }
 
-/// Single source of truth for "which screen is visible". Screens get it via
-/// `@EnvironmentObject private var router: AppRouter` and call `router.go(.log)`.
 final class AppRouter: ObservableObject {
     @Published var selected: AppTab = .home
     func go(_ tab: AppTab) { selected = tab }
@@ -65,7 +47,6 @@ struct RootView: View {
         .environmentObject(router)
     }
 
-    /// Keeps every screen alive, shows only the selected one.
     private func page<Content: View>(_ tab: AppTab, @ViewBuilder content: () -> Content) -> some View {
         let isSelected = router.selected == tab
         return content()
@@ -77,7 +58,6 @@ struct RootView: View {
 
 // MARK: - Screens
 
-/// Starting screen. Intentionally empty: only the background and the shared navigation.
 struct HomeScreen: View {
     var body: some View {
         Theme.background
@@ -87,7 +67,6 @@ struct HomeScreen: View {
     }
 }
 
-/// MOCK for screens that are not built yet.
 struct ComingSoonScreen: View {
     let title: String
 
@@ -116,7 +95,7 @@ struct AppTabBar: View {
         HStack(spacing: 0) {
             item(.home)
             item(.history)
-            Color.clear.frame(width: 76, height: 1)   // room for the dice button
+            Color.clear.frame(width: 76, height: 1)
             item(.log)
             item(.rulebooks)
         }
