@@ -2,16 +2,6 @@
 //  MatchLoggerScreen.swift
 //  TableTop Hub
 //
-//  Match Logger screen (screen 2) in SwiftUI.
-//
-//  ASSUMPTIONS (search for "ASSUMPTION" to find them in the code):
-//  - Minimum target: iOS 17 / Xcode 15 (uses the "crown" SF Symbol, #Preview).
-//  - Everything that has no backend yet is MOCKED: game library, player library,
-//    persistence (in-memory repository), tab navigation, dice button, "add game".
-//  - The screen starts pre-filled with the data from the design (Catan, Alex 12,
-//    Nikita 8, Maria 5) so it looks like the mockup. Set `prefillDemoData` to false
-//    for a blank form.
-//
 
 import SwiftUI
 import Combine
@@ -21,7 +11,7 @@ import Combine
 enum Theme {
     static let background = Color(hex: 0xFBF8F3)
     static let card       = Color.white
-    static let accent     = Color(hex: 0xBF5238)   // terracotta
+    static let accent     = Color(hex: 0xBF5238)
     static let ink        = Color(hex: 0x2A1B14)
     static let muted      = Color(hex: 0x7A6B62)
     static let field      = Color(hex: 0xF4F1EC)
@@ -29,7 +19,6 @@ enum Theme {
     static let tabBar     = Color(hex: 0xFFFDFA)
     static let shadow     = Color(red: 0.31, green: 0.18, blue: 0.10).opacity(0.09)
 
-    /// Avatar colors, picked by `Player.colorIndex`.
     static let avatarPalette: [Color] = [
         Color(hex: 0xC8553D), Color(hex: 0x8A9A5B), Color(hex: 0x4F8A9C),
         Color(hex: 0xB4647A), Color(hex: 0xC98B4A), Color(hex: 0x5C7FA3),
@@ -47,135 +36,50 @@ extension Color {
     }
 }
 
-// MARK: - Models
-
-struct Game: Identifiable, Hashable {
-    let id = UUID()
-    let name: String        // label under the circle
-    let shortName: String   // text inside the circle (ASSUMPTION: max ~5 characters)
-    let color: Color
-}
-
-struct Player: Identifiable, Hashable {
-    let id = UUID()
-    var name: String
-    var colorIndex: Int
-
-    var initial: String { String(name.trimmingCharacters(in: .whitespaces).prefix(1)).uppercased() }
-    var color: Color { Theme.avatarPalette[colorIndex % Theme.avatarPalette.count] }
-}
-
-/// A player taking part in the match being logged.
-struct Participant: Identifiable, Hashable {
-    let id = UUID()
-    let player: Player
-    var score: Int?
-    var isWinner = false
-}
-
-struct LoggedMatch: Identifiable {
-    let id = UUID()
-    let game: Game
-    let sessionName: String?
-    let date: Date
-    let durationMinutes: Int?
-    let participants: [Participant]
-}
-
-// MARK: - Mock data layer (replace with SwiftData / Core Data / backend)
-
-enum GameLibrary {
-    // MOCK: the restricted set of supported games.
-    static let sample: [Game] = [
-        Game(name: "Catan",    shortName: "Catan", color: Color(hex: 0x4E7A63)),
-        Game(name: "HoMM",     shortName: "HoMM",  color: Color(hex: 0x5C7FA3)),
-        Game(name: "Munchkin", shortName: "Munch", color: Color(hex: 0xC98B4A))
-    ]
-}
-
-final class PlayerStore: ObservableObject {
-    static let shared = PlayerStore()
-    @Published private(set) var players: [Player]
-
-    // MOCK: seeded library of known players.
-    init(players: [Player] = [
-        Player(name: "Alex",   colorIndex: 0),
-        Player(name: "Nikita", colorIndex: 1),
-        Player(name: "Maria",  colorIndex: 2),
-        Player(name: "Piotr",  colorIndex: 3),
-        Player(name: "Ola",    colorIndex: 4)
-    ]) {
-        self.players = players
-    }
-
-    func exists(name: String) -> Bool {
-        let n = name.trimmingCharacters(in: .whitespaces).lowercased()
-        return players.contains { $0.name.lowercased() == n }
-    }
-
-    @discardableResult
-    func createPlayer(name: String) -> Player {
-        let player = Player(name: name.trimmingCharacters(in: .whitespaces),
-                            colorIndex: players.count)   // next color in the palette
-        players.append(player)
-        return player
-    }
-}
-
-protocol MatchRepository {
-    func save(_ match: LoggedMatch)
-}
-
-/// MOCK persistence: keeps matches in memory only.
-final class InMemoryMatchRepository: MatchRepository, ObservableObject {
-    static let shared = InMemoryMatchRepository()
-
-    @Published private(set) var matches: [LoggedMatch] = []
-
-    func save(_ match: LoggedMatch) {
-        matches.append(match)
-    }
-
-    func delete(id: UUID) {
-        matches.removeAll { $0.id == id }
-    }
-}
-
 // MARK: - View model
 
 final class MatchLoggerViewModel: ObservableObject {
-    let games = GameLibrary.sample
+    let gameStore: GameStore
     let playerStore: PlayerStore
-    private let repository: MatchRepository
+    let matchStore: MatchStore
 
     @Published var selectedGameID: UUID?
     @Published var sessionName = ""
-    @Published var date: Date?              // nil = "now" (ASSUMPTION)
-    @Published var durationText = ""        // ASSUMPTION: minutes
+    @Published var date: Date?
+    @Published var durationText = ""
     @Published var participants: [Participant] = []
     @Published var lastLogged: LoggedMatch?
+    @Published var errorMessage: String?
 
-    init(playerStore: PlayerStore = PlayerStore(),
-         repository: MatchRepository = InMemoryMatchRepository(),
+    private var cancellables = Set<AnyCancellable>()
+
+    init(gameStore: GameStore = .shared,
+         playerStore: PlayerStore = .shared,
+         matchStore: MatchStore = .shared,
          prefillDemoData: Bool = true) {
+        self.gameStore = gameStore
         self.playerStore = playerStore
-        self.repository = repository
+        self.matchStore = matchStore
+
+        gameStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        playerStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+
         if prefillDemoData {
-            selectedGameID = games.first?.id
+            selectedGameID = gameStore.games.first?.id
             let known = playerStore.players
-            participants = [
-                Participant(player: known[0], score: 12),
-                Participant(player: known[1], score: 8),
-                Participant(player: known[2], score: 5)
-            ]
+            if known.count >= 3 {
+                participants = [
+                    Participant(player: known[0], score: 12),
+                    Participant(player: known[1], score: 8),
+                    Participant(player: known[2], score: 5)
+                ]
+            }
         }
     }
 
+    var games: [Game] { gameStore.games }
     var selectedGame: Game? { games.first { $0.id == selectedGameID } }
-
-    /// ASSUMPTION: a session needs a game and at least one player.
     var canLog: Bool { selectedGame != nil && !participants.isEmpty }
-
     var addedPlayerIDs: Set<UUID> { Set(participants.map { $0.player.id }) }
 
     func add(_ player: Player) {
@@ -188,16 +92,20 @@ final class MatchLoggerViewModel: ObservableObject {
     }
 
     func log() {
-        guard let game = selectedGame, canLog else { return }
-        let name = sessionName.trimmingCharacters(in: .whitespaces)
-        let match = LoggedMatch(game: game,
-                                sessionName: name.isEmpty ? nil : name,
-                                date: date ?? Date(),
-                                durationMinutes: Int(durationText),
-                                participants: participants)
-        repository.save(match)
-        lastLogged = match
-        reset()
+        do {
+            let match = try MatchService.makeMatch(
+                game: selectedGame,
+                sessionName: sessionName,
+                date: date,
+                durationText: durationText,
+                participants: participants
+            )
+            try matchStore.save(match)
+            lastLogged = match
+            reset()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     private func reset() {
@@ -212,17 +120,9 @@ final class MatchLoggerViewModel: ObservableObject {
 // MARK: - Screen
 
 struct MatchLoggerScreen: View {
-    
     @StateObject private var vm = MatchLoggerViewModel()
-    @Binding var tab: AppTab
-
-    init(tab: Binding<AppTab> = .constant(.log)) {
-        _tab = tab
-    }
-    
     @State private var showAddPlayer = false
     @State private var showAddGameAlert = false
-    @State private var showDiceAlert = false
 
     var body: some View {
         ScrollView {
@@ -244,45 +144,39 @@ struct MatchLoggerScreen: View {
                 PlayersCard(participants: $vm.participants,
                             onDelete: vm.remove,
                             onAdd: { showAddPlayer = true })
+
+                LogSessionButton(isEnabled: vm.canLog, action: vm.log)
+                    .padding(.top, 4)
             }
             .padding(.horizontal, 18)
-            .padding(.bottom, 12)
+            .padding(.bottom, 104)
         }
         .scrollDismissesKeyboard(.immediately)
         .background(Theme.background.ignoresSafeArea())
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                LogSessionButton(isEnabled: vm.canLog, action: vm.log)
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 14)
-                AppTabBar(selection: $tab, onDice: { showDiceAlert = true })
-            }
-        }
         .sheet(isPresented: $showAddPlayer) {
             AddPlayerSheet(store: vm.playerStore,
                            alreadyAdded: vm.addedPlayerIDs,
                            onPick: vm.add)
         }
-        // MOCK: game library management is not built yet.
         .alert("Add game", isPresented: $showAddGameAlert) {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Adding games to the library is not implemented yet.")
         }
-        // MOCK: the dice screen is not built yet.
-        .alert("Dice", isPresented: $showDiceAlert) {
+        .alert("Couldn't log session",
+               isPresented: Binding(get: { vm.errorMessage != nil },
+                                    set: { if !$0 { vm.errorMessage = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("The dice screen is not implemented yet.")
+            Text(vm.errorMessage ?? "")
         }
-        // MOCK confirmation for a saved match.
         .alert("Session logged",
                isPresented: Binding(get: { vm.lastLogged != nil },
                                     set: { if !$0 { vm.lastLogged = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             if let m = vm.lastLogged {
-                Text("\(m.game.name) with \(m.participants.count) player(s) was saved (in memory only).")
+                Text("\(m.game.name) with \(m.participants.count) player(s) was saved.")
             }
         }
     }
@@ -408,7 +302,6 @@ private struct DetailsCard: View {
                     }
                     .buttonStyle(.plain)
 
-                    // ASSUMPTION: duration is entered in minutes.
                     TextField("Duration", text: $duration)
                         .font(.system(size: 17))
                         .keyboardType(.numberPad)
@@ -516,7 +409,6 @@ private struct PlayerRow: View {
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.stroke))
                 .accessibilityLabel("Score for \(participant.player.name)")
 
-            // ASSUMPTION: several winners are allowed (ties, co-op games like Pandemic).
             SquareIconButton(systemName: "crown",
                              isOn: participant.isWinner,
                              label: "Mark \(participant.player.name) as winner") {
@@ -587,8 +479,6 @@ private struct LogSessionButton: View {
 
 // MARK: - Add player sheet
 
-/// Lists existing players that are not in the session yet, and has a pinned
-/// "quick create" bar at the bottom. ASSUMPTION: the sheet closes after one player is added.
 struct AddPlayerSheet: View {
     @ObservedObject var store: PlayerStore
     let alreadyAdded: Set<UUID>
@@ -596,6 +486,7 @@ struct AddPlayerSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var newName = ""
+    @State private var createError: String?
 
     private var available: [Player] { store.players.filter { !alreadyAdded.contains($0.id) } }
     private var trimmed: String { newName.trimmingCharacters(in: .whitespaces) }
@@ -658,6 +549,10 @@ struct AddPlayerSheet: View {
                 Text("A player with this name already exists. Pick them from the list above.")
                     .font(.footnote)
                     .foregroundStyle(Theme.accent)
+            } else if let createError {
+                Text(createError)
+                    .font(.footnote)
+                    .foregroundStyle(Theme.accent)
             }
         }
         .padding(16)
@@ -666,79 +561,15 @@ struct AddPlayerSheet: View {
 
     private func create() {
         guard canCreate else { return }
-        onPick(store.createPlayer(name: trimmed))
-        dismiss()
-    }
-}
-
-// MARK: - Bottom tab bar
-
-/// ASSUMPTION: custom bar copied from the design (raised dice button in the middle).
-/// MOCK: only the selection state changes, there is no navigation yet.
-enum AppTab: String, CaseIterable {
-    case home = "Home", history = "History", log = "Log", rulebooks = "Rulebooks"
-
-    var icon: String {
-        switch self {
-        case .home: "house"
-        case .history: "clock.arrow.circlepath"
-        case .log: "doc.text"
-        case .rulebooks: "book"
+        do {
+            let created = try store.createPlayer(name: trimmed)
+            onPick(created)
+            dismiss()
+        } catch {
+            createError = error.localizedDescription
         }
     }
 }
-
-struct AppTabBar: View {
-    @Binding var selection: AppTab
-    let onDice: () -> Void
-
-    var body: some View {
-        HStack(spacing: 0) {
-            item(.home)
-            item(.history)
-            Color.clear.frame(width: 76, height: 1)   // room for the dice button
-            item(.log)
-            item(.rulebooks)
-        }
-        .padding(.top, 10)
-        .padding(.bottom, 6)
-        .frame(maxWidth: .infinity)
-        .background(
-            UnevenRoundedRectangle(topLeadingRadius: 24, topTrailingRadius: 24)
-                .fill(Theme.tabBar)
-                .shadow(color: Theme.shadow, radius: 12, y: -4)
-                .ignoresSafeArea(edges: .bottom)
-        )
-        .overlay(alignment: .top) {
-            Button(action: onDice) {
-                Image(systemName: "die.face.5")
-                    .font(.system(size: 26))
-                    .foregroundStyle(.white)
-                    .frame(width: 62, height: 62)
-                    .background(Circle().fill(Theme.accent))
-                    .overlay(Circle().strokeBorder(Theme.background, lineWidth: 4))
-                    .shadow(color: Theme.accent.opacity(0.35), radius: 10, y: 6)
-            }
-            .offset(y: -28)
-            .accessibilityLabel("Dice")
-        }
-    }
-
-    private func item(_ tab: AppTab) -> some View {
-        Button { selection = tab } label: {
-            VStack(spacing: 4) {
-                Image(systemName: tab.icon).font(.system(size: 20))
-                Text(tab.rawValue).font(.system(size: 10.5, weight: .semibold))
-            }
-            .foregroundStyle(selection == tab ? Theme.accent : Theme.muted)
-            .frame(maxWidth: .infinity, minHeight: 44)
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selection == tab ? .isSelected : [])
-    }
-}
-
-// MARK: - Preview
 
 #Preview {
     MatchLoggerScreen()
