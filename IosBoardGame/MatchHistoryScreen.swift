@@ -1,3 +1,7 @@
+//
+//  MatchHistoryScreen.swift
+//  TableTop Hub
+//
 
 import SwiftUI
 import Combine
@@ -49,7 +53,6 @@ struct HistoryFilter: Equatable {
 
     var isActive: Bool { self != HistoryFilter() }
 
-    /// Newest first. `me` is the player used for the Won / Lost filter.
     func apply(to matches: [LoggedMatch], me: UUID?) -> [LoggedMatch] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         return matches.filter { m in
@@ -76,37 +79,46 @@ struct HistoryFilter: Equatable {
 final class MatchHistoryViewModel: ObservableObject {
     @Published var filter = HistoryFilter()
     @Published var matchToDelete: LoggedMatch?
+    @Published var errorMessage: String?
 
-    let repository: InMemoryMatchRepository
+    let matchStore: MatchStore
     let playerStore: PlayerStore
-    let games = GameLibrary.sample
-    private var cancellable: AnyCancellable?
+    let gameStore: GameStore
+    private var cancellables = Set<AnyCancellable>()
 
-    init(repository: InMemoryMatchRepository = .shared, playerStore: PlayerStore = .shared) {
-        self.repository = repository
+    init(matchStore: MatchStore = .shared,
+         playerStore: PlayerStore = .shared,
+         gameStore: GameStore = .shared) {
+        self.matchStore = matchStore
         self.playerStore = playerStore
-        // Re-render when the repository changes (a match was logged or deleted).
-        cancellable = repository.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+        self.gameStore = gameStore
+
+        matchStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        playerStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        gameStore.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
     }
 
-    /// ASSUMPTION / MOCK: "me" is the first player until user accounts exist.
+    var games: [Game] { gameStore.games }
     var currentPlayerID: UUID? { playerStore.players.first?.id }
+    var visibleMatches: [LoggedMatch] { filter.apply(to: matchStore.matches, me: currentPlayerID) }
 
-    var visibleMatches: [LoggedMatch] { filter.apply(to: repository.matches, me: currentPlayerID) }
+    func delete(_ match: LoggedMatch) {
+        do {
+            try withAnimation { try matchStore.delete(id: match.id) }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
 
-    func delete(_ match: LoggedMatch) { withAnimation { repository.delete(id: match.id) } }
     func clearFilters() { filter = HistoryFilter() }
 }
 
 // MARK: - Screen
 
 struct MatchHistoryScreen: View {
-    @Binding var tab: AppTab
+    @EnvironmentObject private var router: AppRouter
     @StateObject private var vm = MatchHistoryViewModel()
-    @State private var showDiceAlert = false
     @State private var showEditAlert = false
-
-    init(tab: Binding<AppTab>) { _tab = tab }
 
     var body: some View {
         let matches = vm.visibleMatches
@@ -128,7 +140,7 @@ struct MatchHistoryScreen: View {
             if matches.isEmpty {
                 EmptyHistoryView(isFiltered: vm.filter.isActive,
                                  onClear: vm.clearFilters,
-                                 onLog: { tab = .log })
+                                 onLog: { router.go(.log) })
             } else {
                 List(matches) { match in
                     MatchRow(match: match)
@@ -139,25 +151,21 @@ struct MatchHistoryScreen: View {
                             Button(role: .destructive) { vm.matchToDelete = match } label: {
                                 Label("Delete", systemImage: "trash")
                             }
-                            // MOCK: editing a logged match is not built yet.
                             Button { showEditAlert = true } label: {
                                 Label("Edit", systemImage: "pencil")
                             }
                             .tint(Color(hex: 0x2F7468))
                         }
-                    // MOCK: tapping a row will open the Match Detail screen (screen 4).
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
                 .padding(.horizontal, -2)
+                .padding(.bottom, 84)
             }
         }
         .padding(.horizontal, 18)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.background.ignoresSafeArea())
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            AppTabBar(selection: $tab, onDice: { showDiceAlert = true })
-        }
         .confirmationDialog("Delete this match?",
                             isPresented: Binding(get: { vm.matchToDelete != nil },
                                                  set: { if !$0 { vm.matchToDelete = nil } }),
@@ -172,7 +180,13 @@ struct MatchHistoryScreen: View {
         } message: {
             Text("Editing a logged match is not implemented yet.")
         }
-        .diceStubAlert($showDiceAlert)
+        .alert("Couldn't delete match",
+               isPresented: Binding(get: { vm.errorMessage != nil },
+                                    set: { if !$0 { vm.errorMessage = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(vm.errorMessage ?? "")
+        }
     }
 }
 
@@ -358,66 +372,7 @@ private struct EmptyHistoryView: View {
     }
 }
 
-// MARK: - Dice stub (shared by screens that don't have a dice screen yet)
-
-extension View {
-    /// MOCK: the dice screen is not built yet.
-    func diceStubAlert(_ isPresented: Binding<Bool>) -> some View {
-        alert("Dice", isPresented: isPresented) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("The dice screen is not implemented yet.")
-        }
-    }
-}
-
-// MARK: - Placeholder tabs (MOCK)
-
-struct PlaceholderScreen: View {
-    let title: String
-    @Binding var tab: AppTab
-    @State private var showDiceAlert = false
-
-    init(title: String, tab: Binding<AppTab>) {
-        self.title = title
-        _tab = tab
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.system(size: 32, weight: .heavy))
-                .foregroundStyle(Theme.ink)
-                .padding(.top, 8)
-            Text("This screen is not implemented yet.")
-                .foregroundStyle(Theme.muted)
-        }
-        .padding(.horizontal, 18)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.background.ignoresSafeArea())
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            AppTabBar(selection: $tab, onDice: { showDiceAlert = true })
-        }
-        .diceStubAlert($showDiceAlert)
-    }
-}
-
-// MARK: - Root
-
-/// Owns the selected tab and shows the matching screen.
-struct RootView: View {
-    @State private var tab: AppTab = .history   // ASSUMPTION: start on History for now
-
-    var body: some View {
-        switch tab {
-        case .log:       MatchLoggerScreen(tab: $tab)
-        case .history:   MatchHistoryScreen(tab: $tab)
-        case .home:      PlaceholderScreen(title: "Home", tab: $tab)
-        case .rulebooks: PlaceholderScreen(title: "Rulebooks", tab: $tab)
-        }
-    }
-}
-
 #Preview {
-    RootView()
+    MatchHistoryScreen()
+        .environmentObject(AppRouter())
 }
