@@ -2,26 +2,10 @@
 //  Backend.swift
 //  TableTop Hub
 //
-//  Data layer for the Match Logger and Match History screens:
-//    - domain models and their Codable "records"
-//    - local JSON persistence (behind the RecordStorage protocol)
-//    - stores: GameStore, PlayerStore, MatchStore (ObservableObjects the UI observes)
-//    - MatchService: validation and business rules for logging a match
-//
-//  ASSUMPTIONS (search for "ASSUMPTION"):
-//  - Persistence is plain JSON files in Application Support (no SwiftData / network),
-//    so it works in any Swift environment. To move to SwiftData or a server later,
-//    implement RecordStorage or replace the three stores; the screens only use the
-//    stores' public API.
-//  - Stable IDs link records: a match stores gameID and playerIDs, not copies.
-//  - On the very first launch the app is seeded with demo players and matches
-//    (AppEnvironment.useDemoData). Set it to false for a clean start.
-//  - Persisting players/games fails silently (printed to the console); persisting
-//    matches reports errors to the UI.
-//
 
 import Foundation
 import SwiftUI
+import Combine
 
 // MARK: - Environment
 
@@ -52,21 +36,21 @@ struct Player: Identifiable, Hashable, Codable {
 }
 
 /// A player taking part in the match being logged.
-struct Participant: Identifiable, Hashable {
-    let id = UUID()
-    let player: Player
+struct Participant: Identifiable, Hashable, Codable {
+    var id: UUID = UUID()
+    var player: Player
     var score: Int?
-    var isWinner = false
+    var isWinner: Bool = false
 }
 
 /// A match with its game and players already resolved (what the UI works with).
-struct LoggedMatch: Identifiable {
+struct LoggedMatch: Identifiable, Hashable {
     var id: UUID = UUID()
-    let game: Game
-    let sessionName: String?
-    let date: Date
-    let durationMinutes: Int?
-    let participants: [Participant]
+    var game: Game
+    var sessionName: String?
+    var date: Date
+    var durationMinutes: Int?
+    var participants: [Participant]
 }
 
 // MARK: - Persisted records (normalized: only IDs, no copies)
@@ -182,7 +166,6 @@ struct FileRecordStorage: RecordStorage {
         do {
             return try JSONCoding.decoder().decode(T.self, from: data)
         } catch {
-            // Keep the unreadable file for inspection instead of overwriting it silently.
             let backup = directory.appendingPathComponent("\(name).corrupt-\(Int(Date().timeIntervalSince1970)).json")
             try? FileManager.default.moveItem(at: fileURL, to: backup)
             throw error
@@ -216,9 +199,9 @@ private struct Envelope<Item: Codable>: Codable {
 }
 
 enum LoadResult<Item> {
-    case missing            // nothing saved yet (first launch)
+    case missing
     case loaded([Item])
-    case failed             // unreadable (a backup of the file was kept)
+    case failed
 }
 
 extension RecordStorage {
@@ -245,7 +228,6 @@ final class GameStore: ObservableObject {
 
     static let palette: [UInt32] = [0x4E7A63, 0x5C7FA3, 0xC98B4A, 0xB4647A, 0x8E6BB0, 0x6B8F71]
 
-    /// Fixed IDs so saved matches keep pointing at the same games.
     static let defaults: [Game] = [
         Game(id: UUID(uuidString: "6F1A0001-0000-4000-8000-000000000001")!, name: "Catan", shortName: "Catan", colorHex: 0x4E7A63),
         Game(id: UUID(uuidString: "6F1A0001-0000-4000-8000-000000000002")!, name: "HoMM", shortName: "HoMM", colorHex: 0x5C7FA3),
@@ -255,7 +237,7 @@ final class GameStore: ObservableObject {
     @Published private(set) var games: [Game] = []
     private let storage: RecordStorage
 
-    init(storage: RecordStorage) {
+    init(storage: RecordStorage = InMemoryRecordStorage()) {
         self.storage = storage
         switch storage.loadItems(Game.self, name: "games") {
         case .loaded(let items) where !items.isEmpty:
@@ -301,11 +283,10 @@ final class PlayerStore: ObservableObject {
         .enumerated().map { Player(name: $0.element, colorIndex: $0.offset) }
 
     @Published private(set) var players: [Player] = []
-    /// True when this launch created the demo players (used to seed demo matches too).
     private(set) var seededDemoData = false
     private let storage: RecordStorage
 
-    init(storage: RecordStorage) {
+    init(storage: RecordStorage = InMemoryRecordStorage()) {
         self.storage = storage
         switch storage.loadItems(Player.self, name: "players") {
         case .loaded(let items):
@@ -333,7 +314,7 @@ final class PlayerStore: ObservableObject {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw LibraryError.emptyName }
         guard !exists(name: trimmed) else { throw LibraryError.duplicateName(trimmed) }
-        let player = Player(name: trimmed, colorIndex: players.count)   // next palette color
+        let player = Player(name: trimmed, colorIndex: players.count)
         players.append(player)
         persist()
         return player
@@ -351,14 +332,14 @@ final class MatchStore: ObservableObject {
     static let shared = MatchStore(storage: AppEnvironment.storage,
                                    gameStore: .shared, playerStore: .shared)
 
-    /// Newest logged first.
     @Published private(set) var matches: [LoggedMatch] = []
 
     private let storage: RecordStorage
-    /// Records whose game/players no longer exist. Kept and written back so no data is lost.
     private var orphans: [MatchRecord] = []
 
-    init(storage: RecordStorage, gameStore: GameStore, playerStore: PlayerStore) {
+    init(storage: RecordStorage = InMemoryRecordStorage(),
+         gameStore: GameStore = GameStore(),
+         playerStore: PlayerStore = PlayerStore()) {
         self.storage = storage
         switch storage.loadItems(MatchRecord.self, name: "matches") {
         case .loaded(let records):
@@ -381,7 +362,6 @@ final class MatchStore: ObservableObject {
         }
     }
 
-    /// Saves a new match. If writing to disk fails, the in-memory list is rolled back and the error is thrown.
     func save(_ match: LoggedMatch) throws {
         let previous = matches
         matches.insert(match, at: 0)
@@ -420,11 +400,8 @@ final class MatchStore: ObservableObject {
 
 enum MatchService {
     static let durationRange = 1...1440
-
-    /// ASSUMPTION: if nobody is marked as winner but scores exist, the highest score(s) win.
     static let autoPickWinners = true
 
-    /// Validates the form input and builds the match. Throws a MatchValidationError.
     static func makeMatch(game: Game?,
                           sessionName: String,
                           date: Date?,
@@ -449,7 +426,7 @@ enum MatchService {
         }
 
         let when = date ?? now
-        guard when <= now.addingTimeInterval(300) else { throw MatchValidationError.dateInFuture }   // 5 min clock slack
+        guard when <= now.addingTimeInterval(300) else { throw MatchValidationError.dateInFuture }
 
         var finalParticipants = participants
         if autoPickWinners && !participants.contains(where: \.isWinner) {
